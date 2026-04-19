@@ -21,8 +21,11 @@ class WikiGraphState(TypedDict, total=False):
     # Wiki operation parameters
     source_path: Optional[str]
     question: Optional[str]
+    content: Optional[str]
+    content_title: Optional[str]
     write_report: Optional[bool]
     folder: Optional[str]
+    raw_folder: Optional[str]
 
     # Wiki operation results
     wiki_status: Optional[dict]
@@ -30,6 +33,14 @@ class WikiGraphState(TypedDict, total=False):
     query_result: Optional[dict]
     lint_result: Optional[dict]
     sources_list: Optional[list]
+    wiki_answer: Optional[str]
+    wiki_context: Optional[str]
+    wiki_sources: Optional[list[dict]]
+    wiki_needs_ingest: Optional[bool]
+    raw_saved_path: Optional[str]
+    created_wiki_pages: Optional[list[str]]
+    learn_result: Optional[dict]
+    wiki_result: Optional[dict]
 
     # Commit ingest payload
     summary: Optional[dict]

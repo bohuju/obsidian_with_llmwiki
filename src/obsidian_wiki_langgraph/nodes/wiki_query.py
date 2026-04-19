@@ -1,42 +1,28 @@
-"""Wiki Query node — search wiki knowledge base and build answer prompt."""
+"""Wiki Query node — use OpenCode to retrieve wiki context and final answer."""
 
+from ..core.opencode_runner import OpenCodeError
+from ..core.opencode_workflows import run_wiki_retrieve
 from ..state import WikiGraphState
-from ..core.link_engine import LinkEngine
-from ..core.wiki_manager import WikiManager
-from ..core.wiki_querier import WikiQuerier
-from ..config import VAULT_PATH, WIKI_ROOT
-
-_querier: WikiQuerier | None = None
-
-
-def _get_querier() -> WikiQuerier:
-    global _querier
-    if _querier is None:
-        manager = WikiManager(str(VAULT_PATH), WIKI_ROOT or None)
-        engine = LinkEngine(str(VAULT_PATH))
-        _querier = WikiQuerier(manager, engine)
-    return _querier
 
 
 def wiki_query_node(state: WikiGraphState) -> dict:
-    """Query the wiki knowledge base."""
+    """Query the wiki knowledge base through OpenCode + MCP."""
     question = state.get("question") or state.get("user_input", "")
     if not question:
         return {"error": "No question provided", "response": "请提供查询问题"}
 
-    querier = _get_querier()
-    result = querier.query(question)
-
-    pages_info = "\n".join(
-        f"  - {p['path']} ({p.get('title', 'untitled')}) [{p.get('relevance', '')}]"
-        for p in result.get("relevant_pages", [])
-    ) or "No relevant pages found."
+    try:
+        result = run_wiki_retrieve(question)
+    except OpenCodeError as exc:
+        return {
+            "error": str(exc),
+            "response": f"Wiki query failed: {exc}",
+        }
 
     return {
         "query_result": result,
-        "response": (
-            f"## Query: {question}\n\n"
-            f"### Relevant Pages\n{pages_info}\n\n"
-            f"### Answer Prompt\n\n{result['prompt']}"
-        ),
+        "wiki_answer": result.get("answer", ""),
+        "wiki_context": result.get("context_summary", ""),
+        "wiki_sources": result.get("sources", []),
+        "response": result.get("answer", ""),
     }

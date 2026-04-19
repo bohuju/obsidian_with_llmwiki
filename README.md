@@ -93,10 +93,25 @@ npm run build
 
 适用于将 Wiki 知识编译作为节点嵌入到其他 LangGraph 工作流。
 
+### 当前更新
+
+`langgraph_node` 分支目前已经收敛为 **2 个 OpenCode 驱动节点**：
+
+- `wiki_learn`
+  接收上游新内容，交给 OpenCode 选择规范的 `raw/` 子目录与文件名，写入 `raw/` 后继续调用 `obsidian-wiki` MCP 完成 wiki 编译更新。
+- `wiki_retrieve`
+  接收查询问题，交给 OpenCode 调用 `obsidian-wiki` MCP 的 `wiki_query` 做检索，并直接生成结构化回答结果。
+
+也就是说，这个分支现在的 LangGraph 节点本身不再手写本地检索/编译逻辑，而是把检索、知识编译、结果组织统一委托给：
+
+```text
+LangGraph Node -> OpenCode -> obsidian-wiki MCP -> Obsidian Vault
+```
+
 ### 核心能力
 
-- **其他节点的产出 → 放入 raw/ → 自动摄入为 wiki 页面**
-- **下游节点运行前 → 查询 wiki → 输出结果给下一个节点**
+- **其他节点的产出 → 通过 OpenCode 规范落到 `raw/` → 编译更新 `wiki/`**
+- **下游节点运行前 → 通过 OpenCode 检索 `wiki/` → 直接生成结果给下一个节点**
 
 ### 安装
 
@@ -108,6 +123,12 @@ pip install -e .
 
 依赖：`langgraph`, `langchain-core`, `langchain-anthropic`（自动安装）
 
+额外前提：
+
+- 本机需要安装可用的 `opencode` CLI
+- `opencode` 中需要已经配置好 `obsidian-wiki` MCP server
+- `obsidian-wiki` MCP server 需要能访问目标 Obsidian Vault
+
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
@@ -115,19 +136,62 @@ pip install -e .
 | `OBSIDIAN_VAULT_PATH` | `/home/bohuju/ObsidianVault` | Obsidian Vault 路径 |
 | `WIKI_ROOT` | `""` | Wiki 子目录（空 = Vault 根目录） |
 
-### 3 个独立 Node 函数
+### 2 个独立 Node 函数
 
 可直接 `add_node` 到任何父 LangGraph：
 
 ```python
-from obsidian_wiki_langgraph.wiki_nodes import wiki_write_raw, wiki_auto_ingest, wiki_query
+from obsidian_wiki_langgraph.wiki_nodes import wiki_learn, wiki_retrieve
 ```
 
 | Node | 功能 | 输入 → 输出 |
 |------|------|-------------|
-| `wiki_write_raw` | 将上游产出保存到 raw/ | `content` + `content_title` → `raw_saved_path` |
-| `wiki_auto_ingest` | 自动摄入 raw 文件为 wiki 页面 | `raw_saved_path` → `ingest_result` |
-| `wiki_query` | 查询 wiki 知识库 | `wiki_query` → `wiki_context` |
+| `wiki_learn` | 通过 OpenCode 规范 raw 目录并编译到 wiki | `content` + `content_title` (+ `raw_folder` hint) → `raw_saved_path` + `created_wiki_pages` + `ingest_result` |
+| `wiki_retrieve` | 通过 OpenCode 调用 wiki 检索并直接生成结果 | `wiki_query` → `wiki_answer` + `wiki_context` + `wiki_sources` |
+
+### 节点协议
+
+两个节点都通过 OpenCode 返回结构化 JSON，LangGraph 侧只消费规范化结果。
+
+`wiki_learn` 的最小输入：
+
+```python
+{
+  "content": "...",
+  "content_title": "...",
+  "raw_folder": "tech",  # 可选 hint
+}
+```
+
+`wiki_learn` 的核心输出：
+
+```python
+{
+  "raw_folder": "tech",
+  "raw_saved_path": "raw/tech/example.md",
+  "created_wiki_pages": ["wiki/summaries/example.md"],
+  "ingest_result": "..."
+}
+```
+
+`wiki_retrieve` 的最小输入：
+
+```python
+{
+  "wiki_query": "什么是 Fuzzing"
+}
+```
+
+`wiki_retrieve` 的核心输出：
+
+```python
+{
+  "wiki_answer": "...",
+  "wiki_context": "...",
+  "wiki_sources": [{"path": "wiki/...", "title": "...", "relevance": "..."}],
+  "wiki_needs_ingest": False
+}
+```
 
 ### State 定义
 
@@ -147,11 +211,15 @@ class MyState(WikiSubgraphState, TypedDict, total=False):
 | 字段 | 方向 | 说明 |
 |------|------|------|
 | `content` | 输入 | 上游节点产出的内容 |
-| `content_title` | 输入 | 内容标题（用作文件名） |
-| `raw_folder` | 输入 | raw/ 子目录（默认 `"general"`） |
+| `content_title` | 输入 | 内容标题（供 OpenCode 规范文件名） |
+| `raw_folder` | 输入 | raw/ 子目录 hint |
 | `wiki_query` | 输入 | 要查询 wiki 的问题 |
-| `wiki_context` | 输出 | wiki 查询结果（给下游节点用） |
+| `wiki_answer` | 输出 | OpenCode 基于 wiki 生成的最终回答 |
+| `wiki_context` | 输出 | 检索到的上下文摘要 |
+| `wiki_sources` | 输出 | 命中的 wiki 页面来源 |
+| `wiki_needs_ingest` | 输出 | wiki 是否缺信息、建议继续摄入 |
 | `raw_saved_path` | 输出 | 内容保存到 raw/ 后的路径 |
+| `created_wiki_pages` | 输出 | 本次编译创建的 wiki 页面 |
 | `ingest_result` | 输出 | 摄入结果摘要 |
 
 ### 用法 1：独立节点（最灵活）
@@ -159,7 +227,7 @@ class MyState(WikiSubgraphState, TypedDict, total=False):
 ```python
 from langgraph.graph import StateGraph, START, END
 from obsidian_wiki_langgraph.subgraph_state import WikiSubgraphState
-from obsidian_wiki_langgraph.wiki_nodes import wiki_write_raw, wiki_auto_ingest, wiki_query
+from obsidian_wiki_langgraph.wiki_nodes import wiki_learn, wiki_retrieve
 
 class MyState(WikiSubgraphState, TypedDict, total=False):
     messages: Annotated[list, add_messages]
@@ -168,31 +236,30 @@ g = StateGraph(MyState)
 
 # 你的节点
 g.add_node("scraper", my_scraper_node)     # 产出 content
-g.add_node("save", wiki_write_raw)          # content → raw/
-g.add_node("ingest", wiki_auto_ingest)      # raw/ → wiki 页面
-g.add_node("query", wiki_query)             # wiki → wiki_context
-g.add_node("llm", my_llm_node)              # 使用 wiki_context
+g.add_node("learn", wiki_learn)             # content → raw/ + wiki
+g.add_node("retrieve", wiki_retrieve)       # wiki → wiki_answer/wiki_context
+g.add_node("llm", my_llm_node)              # 使用 wiki_answer/wiki_context
 
 g.add_edge(START, "scraper")
-g.add_edge("scraper", "save")
-g.add_edge("save", "ingest")
-g.add_edge("ingest", "llm")
+g.add_edge("scraper", "learn")
+g.add_edge("learn", "llm")
 g.add_edge("llm", END)
 
 app = g.compile()
 
-# 运行：上游产出内容 → 自动保存到 raw → 摄入 wiki
+# 运行：上游产出内容 → OpenCode 选择 raw 目录并编译进 wiki
 result = app.invoke({
     "content": "一篇技术文章内容...",
     "content_title": "rust-async",
     "raw_folder": "tech",
 })
 print(result["raw_saved_path"])   # "raw/tech/rust-async.md"
-print(result["ingest_result"])    # "Auto-ingested: wiki/summaries/..."
+print(result["created_wiki_pages"])
+print(result["ingest_result"])
 
-# 运行：查询 wiki 知识传给下游
+# 运行：查询 wiki 知识并直接生成回答
 result = app.invoke({"wiki_query": "什么是 Fuzzing"})
-print(result["wiki_context"])     # wiki 中相关页面内容
+print(result["wiki_answer"])
 ```
 
 ### 用法 2：子图模式（一行搞定）
@@ -212,9 +279,9 @@ g.add_edge("llm", END)
 ```
 
 子图内部根据 State 自动选择流程：
-- State 有 `content` → 执行 `wiki_write_raw` → `wiki_auto_ingest`
-- State 有 `wiki_query` → 执行 `wiki_query`
-- 也可通过 `wiki_route` 字段强制指定：`"write"` / `"write_and_ingest"` / `"query"`
+- State 有 `content` → 执行 `wiki_learn`
+- State 有 `wiki_query` → 执行 `wiki_retrieve`
+- 也可通过 `wiki_route` 字段强制指定：`"learn"` / `"retrieve"`
 
 ### 用法 3：CLI 独立运行
 
@@ -254,7 +321,7 @@ src/obsidian_wiki_langgraph/
 ├── graph.py                # 独立运行 Graph（7 节点）
 ├── router.py               # 路由节点
 ├── subgraph_state.py       # ★ 子图通用 State（WikiSubgraphState）
-├── wiki_nodes.py           # ★ 3 个独立节点函数
+├── wiki_nodes.py           # ★ 2 个 OpenCode 驱动节点函数
 ├── subgraph.py             # ★ 预装配子图
 ├── core/                   # 核心逻辑（TS 移植）
 │   ├── utils.py
@@ -263,7 +330,9 @@ src/obsidian_wiki_langgraph/
 │   ├── wiki_manager.py
 │   ├── wiki_ingester.py
 │   ├── wiki_querier.py
-│   └── wiki_linter.py
+│   ├── wiki_linter.py
+│   ├── opencode_runner.py  # ★ 调用 opencode 并抽取 JSON 结果
+│   └── opencode_workflows.py # ★ learn / retrieve / ingest 的 OpenCode 工作流
 ├── nodes/                  # 独立运行模式的节点
 ├── tools/                  # @tool 定义（11 个）
 └── templates/              # 模板

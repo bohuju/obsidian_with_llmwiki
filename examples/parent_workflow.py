@@ -17,7 +17,7 @@ from langchain_core.messages import BaseMessage
 
 # 导入 wiki 节点
 from obsidian_wiki_langgraph.subgraph_state import WikiSubgraphState
-from obsidian_wiki_langgraph.wiki_nodes import wiki_write_raw, wiki_auto_ingest, wiki_query
+from obsidian_wiki_langgraph.wiki_nodes import wiki_learn, wiki_retrieve
 from obsidian_wiki_langgraph.subgraph import build_wiki_subgraph
 
 
@@ -61,11 +61,14 @@ Pin 确保 Future 不会被移动到内存中的其他位置，
 def mock_llm(state: MyWorkflowState) -> dict:
     """模拟下游节点：使用 wiki 查询结果。"""
     wiki_context = state.get("wiki_context", "")
+    wiki_answer = state.get("wiki_answer", "")
     ingest_result = state.get("ingest_result", "")
 
     response_parts = []
     if ingest_result:
         response_parts.append(f"Wiki 摄入结果: {ingest_result}")
+    if wiki_answer:
+        response_parts.append(f"Wiki 回答:\n{wiki_answer[:500]}")
     if wiki_context:
         response_parts.append(f"Wiki 查询上下文:\n{wiki_context[:500]}")
 
@@ -77,14 +80,12 @@ def build_parent_graph():
     g = StateGraph(MyWorkflowState)
 
     g.add_node("scraper", mock_scraper)
-    g.add_node("save_to_raw", wiki_write_raw)
-    g.add_node("ingest", wiki_auto_ingest)
+    g.add_node("learn", wiki_learn)
     g.add_node("llm", mock_llm)
 
     g.add_edge(START, "scraper")
-    g.add_edge("scraper", "save_to_raw")
-    g.add_edge("save_to_raw", "ingest")
-    g.add_edge("ingest", "llm")
+    g.add_edge("scraper", "learn")
+    g.add_edge("learn", "llm")
     g.add_edge("llm", END)
 
     return g.compile()
@@ -123,15 +124,15 @@ def build_query_workflow():
         response: Optional[str]
 
     def mock_downstream(state: QueryState) -> dict:
-        wiki_context = state.get("wiki_context", "无 wiki 结果")
-        return {"response": f"基于 wiki 知识回答:\n{wiki_context[:300]}"}
+        wiki_answer = state.get("wiki_answer", "无 wiki 结果")
+        return {"response": f"基于 wiki 知识回答:\n{wiki_answer[:300]}"}
 
     g = StateGraph(QueryState)
-    g.add_node("query_wiki", wiki_query)
+    g.add_node("retrieve_wiki", wiki_retrieve)
     g.add_node("answer", mock_downstream)
 
-    g.add_edge(START, "query_wiki")
-    g.add_edge("query_wiki", "answer")
+    g.add_edge(START, "retrieve_wiki")
+    g.add_edge("retrieve_wiki", "answer")
     g.add_edge("answer", END)
 
     return g.compile()
@@ -148,6 +149,7 @@ if __name__ == "__main__":
     graph1 = build_parent_graph()
     result1 = graph1.invoke({})
     print(f"raw_saved_path: {result1.get('raw_saved_path')}")
+    print(f"created_wiki_pages: {result1.get('created_wiki_pages')}")
     print(f"ingest_result: {result1.get('ingest_result')}")
     print()
 
